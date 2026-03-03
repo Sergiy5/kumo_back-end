@@ -25,8 +25,11 @@ const envSchema = z.object({
   SMTP_USER: isProd ? z.string() : optional,
   SMTP_PASS: isProd ? z.string() : optional,
   SMTP_FROM: isProd ? z.string() : optional,
-  GOOGLE_SERVICE_ACCOUNT_KEY: isProd ? z.string() : optional,
-  ANDROID_PACKAGE_NAME: isProd ? z.string() : optional,
+  // RevenueCat (subscription management)
+  REVENUECAT_SECRET_API_KEY: isProd ? z.string() : optional,
+  REVENUECAT_WEBHOOK_SECRET: isProd ? z.string() : optional,
+  // Expo Push Notifications (optional — increases delivery reliability)
+  EXPO_ACCESS_TOKEN: optional,
   GOOGLE_SHEETS_PRIVATE_KEY: isProd ? z.string() : optional,
   GOOGLE_SHEETS_CLIENT_EMAIL: isProd ? z.string() : optional,
   GOOGLE_SHEETS_SPREADSHEET_ID: isProd ? z.string() : optional,

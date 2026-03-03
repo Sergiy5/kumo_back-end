@@ -27,10 +27,16 @@ const updateProfileSchema = z
   .object({
     firstName: z.string().min(1).max(50).optional(),
     lastName: z.string().min(1).max(50).optional(),
+    notification: z.boolean().optional(),
   })
-  .refine((data) => data.firstName !== undefined || data.lastName !== undefined, {
-    message: 'At least one field must be provided',
-  });
+  .refine(
+    (data) => data.firstName !== undefined || data.lastName !== undefined || data.notification !== undefined,
+    { message: 'At least one field must be provided' }
+  );
+
+const pushTokenSchema = z.object({
+  token: z.string().min(1, 'Push token is required'),
+});
 
 const deleteAccountSchema = z.object({
   password: z.string().min(1, 'Password is required'),
@@ -47,7 +53,7 @@ const profileRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get('/me', async (request, reply) => {
     const userId = request.user.userId;
 
-    const user = await fastify.prisma.user.findUnique({
+    let user = await fastify.prisma.user.findUnique({
       where: { id: userId },
       include: {
         weeklyStreaks: {
@@ -61,12 +67,21 @@ const profileRoutes: FastifyPluginAsync = async (fastify) => {
       httpError('User not found', 404);
     }
 
+    // Auto-expire subscription if past nextPaymentDate (safety net for missed RC webhooks)
+    if (user!.subscription === 'pro' && user!.nextPaymentDate && new Date(user!.nextPaymentDate) < new Date()) {
+      user = await fastify.prisma.user.update({
+        where: { id: userId },
+        data: { subscription: 'cancelled' },
+        include: { weeklyStreaks: { orderBy: { date: 'desc' }, take: 7 } },
+      });
+    }
+
     return reply.send({
-      user: formatUserResponse(user, user.weeklyStreaks),
+      user: formatUserResponse(user!, user!.weeklyStreaks),
     });
   });
 
-  // PATCH /me - Update profile (firstName, lastName)
+  // PATCH /me - Update profile (firstName, lastName, notification)
   fastify.patch('/me', async (request, reply) => {
     const parsed = updateProfileSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -74,11 +89,12 @@ const profileRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const userId = request.user.userId;
-    const { firstName, lastName } = parsed.data;
+    const { firstName, lastName, notification } = parsed.data;
 
-    const updateData: { firstName?: string; lastName?: string } = {};
+    const updateData: { firstName?: string; lastName?: string; notification?: boolean } = {};
     if (firstName !== undefined) updateData.firstName = firstName;
     if (lastName !== undefined) updateData.lastName = lastName;
+    if (notification !== undefined) updateData.notification = notification;
 
     const user = await fastify.prisma.user.update({
       where: { id: userId },
@@ -96,6 +112,24 @@ const profileRoutes: FastifyPluginAsync = async (fastify) => {
       message: 'Profile updated successfully',
       user: formatUserResponse(user, user.weeklyStreaks),
     });
+  });
+
+  // POST /push-token - Store Expo push token
+  fastify.post('/push-token', async (request, reply) => {
+    const parsed = pushTokenSchema.safeParse(request.body);
+    if (!parsed.success) {
+      httpError(parsed.error.errors[0].message, 400);
+    }
+
+    const { token } = parsed.data;
+    const userId = request.user.userId;
+
+    await fastify.prisma.user.update({
+      where: { id: userId },
+      data: { pushToken: token },
+    });
+
+    return reply.send({ success: true });
   });
 
   // DELETE /me - Delete user account

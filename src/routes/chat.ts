@@ -1,14 +1,14 @@
-import { FastifyPluginAsync } from 'fastify';
+import { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { AppError } from '../utils/errors';
-import { buildChatMessages, streamChatResponse } from '../services/chat.service';
+import { buildChatMessages, streamChatResponse, validateMessageTokens } from '../services/chat.service';
+import { httpError } from '../utils/errors';
 
 const chatStreamSchema = z.object({
   messages: z
     .array(
       z.object({
         role: z.enum(['user', 'assistant']),
-        content: z.string().min(1).max(10000),
+        content: z.string().min(1).max(2000),
       })
     )
     .min(1)
@@ -20,13 +20,24 @@ const chatRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('onRequest', fastify.authenticate);
 
   // POST /chat/stream (SSE)
-  fastify.post('/stream', async (request, reply) => {
+  fastify.post('/stream', {
+    config: {
+      rateLimit: {
+        max: 20,
+        timeWindow: '1 hour',
+        keyGenerator: (request: FastifyRequest) =>
+          (request.user as any)?.userId ?? request.ip,
+      },
+    },
+  }, async (request, reply) => {
     const parsed = chatStreamSchema.safeParse(request.body);
     if (!parsed.success) {
-      throw new AppError(parsed.error.errors[0].message, 400);
+      return httpError(parsed.error.errors[0].message, 400);
     }
 
     const { messages } = parsed.data;
+
+    validateMessageTokens(messages);
 
     // Set SSE headers
     reply.raw.writeHead(200, {

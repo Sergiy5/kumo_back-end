@@ -1,6 +1,14 @@
-import { User, WeeklyStreak } from '@prisma/client';
+// DB / JWT format (matches Prisma enum values exactly)
+export const ROLES = {
+  USER: 'user',
+  ADMIN: 'admin',
+  SUPER_ADMIN: 'super_admin',
+} as const
+
+export type RoleValue = typeof ROLES[keyof typeof ROLES]
 
 export interface UserResponse {
+  id: string;
   firstName: string | null;
   lastName: string | null;
   email: string;
@@ -8,8 +16,9 @@ export interface UserResponse {
   subscription: string;
   nextPaymentDate: string | null;
   trialEndsDate: string | null;
+  productId: string | null;
   weeklyStreak: { date: string }[];
-  role: string;
+  role: 'user' | 'admin' | 'super-admin';
   notification: boolean;
   createdAt: string;
 }
@@ -38,6 +47,7 @@ export interface WeeklyStreakResponse {
 export interface JwtPayload {
   userId: string;
   email: string;
+  role: string;
 }
 
 declare module '@fastify/jwt' {

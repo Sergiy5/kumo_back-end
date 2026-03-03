@@ -19,17 +19,25 @@ const feedbackRoutes: FastifyPluginAsync = async (fastify) => {
 
     const { feedback, rating, name } = parsed.data;
 
+    // Save to DB (primary) and Google Sheets (secondary) independently
     try {
-      await appendFeedbackToSheet({ name, rating, feedback });
-
-      return reply.send({
-        success: true,
-        message: 'Feedback submitted successfully',
-      });
+      await fastify.prisma.feedback.create({ data: { name, rating, feedback } });
     } catch (error) {
-      fastify.log.error(error);
+      fastify.log.error(error, 'Failed to save feedback to DB');
       httpError('Failed to submit feedback', 500);
     }
+
+    try {
+      await appendFeedbackToSheet({ name, rating, feedback });
+    } catch (error) {
+      fastify.log.error(error, 'Failed to save feedback to Google Sheets');
+      // Non-fatal — DB save already succeeded
+    }
+
+    return reply.send({
+      success: true,
+      message: 'Feedback submitted successfully',
+    });
   });
 };
 

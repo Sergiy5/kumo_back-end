@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
+import rateLimit from '@fastify/rate-limit';
 import { env } from './config/env';
 import prismaPlugin from './plugins/prisma';
 import authPlugin from './plugins/auth';
@@ -10,6 +11,7 @@ import chatRoutes from './routes/chat';
 import subscriptionRoutes from './routes/subscription';
 import streakRoutes from './routes/streak';
 import feedbackRoutes from './routes/feedback';
+import adminRoutes from './routes/admin';
 
 const buildApp = async () => {
   const fastify = Fastify({
@@ -24,6 +26,16 @@ const buildApp = async () => {
     limits: {
       fileSize: 10 * 1024 * 1024, // 10MB
     },
+  });
+  await fastify.register(rateLimit, {
+    global: true,
+    max: 100,
+    timeWindow: '1 minute',
+    keyGenerator: (request) => request.ip,
+    errorResponseBuilder: (_request, _context) => ({
+      message: 'Too many requests, please try again later',
+      statusCode: 429,
+    }),
   });
 
   // Error handler
@@ -45,9 +57,22 @@ const buildApp = async () => {
     }
 
     // JWT errors
-    if (error.code === 'FST_JWT_NO_AUTHORIZATION_IN_HEADER') {
+    if (
+      error.code === 'FST_JWT_NO_AUTHORIZATION_IN_HEADER' ||
+      error.code === 'FST_JWT_BAD_REQUEST'
+    ) {
       return reply.status(401).send({
         message: 'Authorization header missing',
+        statusCode: 401,
+      });
+    }
+
+    if (
+      error.code === 'FST_JWT_AUTHORIZATION_TOKEN_EXPIRED' ||
+      error.code === 'FST_JWT_AUTHORIZATION_TOKEN_INVALID'
+    ) {
+      return reply.status(401).send({
+        message: 'Token expired or invalid',
         statusCode: 401,
       });
     }
@@ -66,6 +91,7 @@ const buildApp = async () => {
   await fastify.register(subscriptionRoutes, { prefix: '/subscription' });
   await fastify.register(streakRoutes, { prefix: '/streak' });
   await fastify.register(feedbackRoutes, { prefix: '/feedback' });
+  await fastify.register(adminRoutes, { prefix: '/admin' });
 
   // Health check
   fastify.get('/health', async () => ({ status: 'ok' }));
@@ -77,9 +103,9 @@ const start = async () => {
   try {
     const app = await buildApp();
     await app.listen({ port: env.PORT, host: '0.0.0.0' });
-    console.log(`Server running on port ${env.PORT}`);
+    app.log.info(`Server running on port ${env.PORT}`);
   } catch (err) {
-    console.error(err);
+    console.error("ERROR in app.ts: ", err);
     process.exit(1);
   }
 };

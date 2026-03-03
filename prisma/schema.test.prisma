@@ -17,8 +17,11 @@ model User {
   subscription    String    @default("free")
   nextPaymentDate DateTime?
   trialEndsDate   DateTime?
+  productId       String?
+  purchaseToken   String?
   role            String    @default("user")
   notification    Boolean   @default(true)
+  pushToken       String?
   createdAt       DateTime  @default(now())
 
   weeklyStreaks      WeeklyStreak[]
@@ -47,4 +50,14 @@ model VerificationToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("verification_tokens")
+}
+
+model Feedback {
+  id        String   @id @default(uuid())
+  name      String?
+  rating    Int?
+  feedback  String?
+  createdAt DateTime @default(now())
+
+  @@map("feedbacks")
 }

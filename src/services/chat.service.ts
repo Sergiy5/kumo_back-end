@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { env } from '../config/env';
+import { httpError } from '../utils/errors';
 
 let _openai: OpenAI | null = null;
 
@@ -29,6 +30,27 @@ export interface ChatMessage {
 export interface ClientMessage {
   role: 'user' | 'assistant';
   content: string;
+}
+
+const MAX_TOKENS_PER_MESSAGE = 500;  // ~2,000 chars
+const MAX_TOTAL_TOKENS = 4000;       // whole context
+
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+export function validateMessageTokens(messages: ClientMessage[]): void {
+  let total = 0;
+  for (const msg of messages) {
+    const tokens = estimateTokens(msg.content);
+    if (tokens > MAX_TOKENS_PER_MESSAGE) {
+      httpError(`Message too long (approx ${tokens} tokens, max ${MAX_TOKENS_PER_MESSAGE})`, 400);
+    }
+    total += tokens;
+  }
+  if (total > MAX_TOTAL_TOKENS) {
+    httpError(`Conversation too long (approx ${total} tokens, max ${MAX_TOTAL_TOKENS})`, 400);
+  }
 }
 
 export function buildChatMessages(messages: ClientMessage[]): ChatMessage[] {

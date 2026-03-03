@@ -13,12 +13,14 @@ function resolveDatasourceUrl(): string | undefined {
   const url = process.env.DATABASE_URL;
   if (!url || !url.startsWith('file:')) return undefined;
   const filePath = url.replace('file:', '');
-  return 'file:' + path.resolve(filePath);
+  // Prisma CLI resolves file: URLs relative to the schema file location (prisma/).
+  // Resolve relative to the same prisma/ directory so both use the same DB file.
+  return 'file:' + path.resolve('prisma', filePath);
 }
 
 const prismaPlugin: FastifyPluginAsync = async (fastify) => {
   const datasourceUrl = resolveDatasourceUrl();
-  const prisma = new PrismaClient(datasourceUrl ? { datasourceUrl } : {});
+  const prisma = new PrismaClient(datasourceUrl ? { datasourceUrl } : undefined);
 
   await prisma.$connect();
 

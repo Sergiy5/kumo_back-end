@@ -10,7 +10,6 @@ This is the backend for **Kumo** - a mental wellness React Native app (Expo). Th
 - **Runtime:** Node.js with **Fastify** (v5)
 - **Database:** PostgreSQL (production) / SQLite (local dev) with **Prisma**
 - **Auth:** JWT (Bearer token in Authorization header) — single token, no refresh tokens
-- **Rate Limiting:** `@fastify/rate-limit` — global + per-route overrides
 - **File Storage:** AWS S3-compatible (audio uploads)
 - **AI Provider:** OpenAI API for chat responses (streaming)
 - **Email:** SMTP via Nodemailer
@@ -33,11 +32,8 @@ This is the backend for **Kumo** - a mental wellness React Native app (Expo). Th
 | subscription    | ENUM      | `free`, `free-trial`, `pro`, `cancelled` |
 | nextPaymentDate | TIMESTAMP | Nullable                                 |
 | trialEndsDate   | TIMESTAMP | Nullable                                 |
-| productId       | VARCHAR   | Nullable — `pro_monthly` \| `pro_quarterly` |
-| purchaseToken   | VARCHAR   | Nullable — latest Play Store token       |
 | role            | ENUM      | `user`, `admin`. Default: `user`         |
 | notification    | BOOLEAN   | Default: true                            |
-| pushToken       | VARCHAR   | Nullable — Expo push token for this device |
 | createdAt       | TIMESTAMP | Auto-generated                           |
 
 ### weekly_streaks
@@ -161,13 +157,13 @@ Response: { user: User }
 #### `PATCH /me`
 
 ```
-Request:  { firstName?: string, lastName?: string, notification?: boolean }
+Request:  { firstName?: string, lastName?: string }
 Response: { success: boolean, message: string, user: User }
 ```
 
 - At least one field required
-- `firstName` / `lastName`: min 1 char, max 50 chars
-- `notification`: boolean — controls whether the user receives push notifications
+- Only `firstName` and `lastName` can be updated via this route
+- Fields: min 1 char, max 50 chars
 
 #### `DELETE /me`
 
@@ -178,29 +174,6 @@ Response: { success: boolean, message: string }
 
 - Requires password confirmation
 - All related data (weeklyStreaks, verificationTokens) cascade deleted
-
-#### `POST /push-token`
-
-```
-Request:  { token: string }
-Response: { success: boolean }
-Auth:     required (Bearer)
-```
-
-- Stores the Expo push token for the authenticated user — overwrites any previous value
-- Only called when the device token changes (the app detects this and re-registers)
-- Respect the user's `notification` flag: if `notification = false`, ignore incoming pushes for this user
-
-**Prisma implementation:**
-```typescript
-await prisma.user.update({
-  where: { id: request.user.id },
-  data: { pushToken: body.token },
-})
-return { success: true }
-```
-
-> **Note:** `pushToken` is never included in user responses — it is internal to the server only.
 
 #### `POST /change-email`
 
@@ -255,11 +228,8 @@ SSE endpoint. Client sends the full message history; backend streams the AI resp
 Request:  { messages: Array<{ role: 'user' | 'assistant', content: string }> }
 ```
 
-- `messages` array: 1–100 items, each content max 2,000 chars
-- Per-message token limit: 500 estimated tokens (~2,000 chars)
-- Total context limit: 4,000 estimated tokens across all messages
+- `messages` array: 1–100 items, each content max 10,000 chars
 - Auth required
-- Rate limited: 20 requests per hour per user
 
 **Response headers:**
 
@@ -280,259 +250,26 @@ data: {"type":"error","content":"<description>"}\n\n   (on error)
 
 **Implementation:**
 
-1. Validate messages array (Zod schema)
-2. Validate token limits via `validateMessageTokens()` — rejects before SSE headers are written
-3. Build system prompt + message history via `buildChatMessages()`
-4. Call OpenAI with streaming enabled via `streamChatResponse()`
-5. Write each token as an SSE event
-6. Send `done` then `[DONE]`, close stream
-7. Keep-alive: write `: keepalive\n\n` every 15 seconds
-8. Clean up interval on client disconnect
+1. Validate messages array
+2. Build system prompt + message history via `buildChatMessages()`
+3. Call OpenAI with streaming enabled via `streamChatResponse()`
+4. Write each token as an SSE event
+5. Send `done` then `[DONE]`, close stream
+6. Keep-alive: write `: keepalive\n\n` every 15 seconds
+7. Clean up interval on client disconnect
 
 ### Subscription (auth required)
 
 #### `POST /subscription/verify`
 
 ```
-Request:  {} (empty body — user identified from JWT)
+Request:  { purchaseToken: string, productId: string }
 Response: { success: boolean, message: string, user: User }
 ```
 
-- Call RevenueCat REST API using the authenticated user's `id` as the RC `appUserId`:
-  ```
-  GET https://api.revenuecat.com/v1/subscribers/{userId}
-  Authorization: Bearer {REVENUECAT_SECRET_API_KEY}
-  ```
-- Check `subscriber.entitlements.pro.is_active === true`
-- Updates user: `subscription: 'pro'`, `nextPaymentDate` from `subscriber.entitlements.pro.expires_date`, `productId` from `subscriber.entitlements.pro.product_identifier`
-- If entitlement not active: return user with current (unchanged) subscription status
-
-#### `POST /subscription/restore`
-
-```
-Request:  {} (empty body — user identified from JWT)
-Response: { success: boolean, message: string, user: User }
-```
-
-- Same logic as `/subscription/verify` — calls RC REST API with the JWT user's `id`
-- RC already tracks all purchases associated with that `appUserId`
-- If entitlement active: restores `subscription: 'pro'`, refreshes `nextPaymentDate`
-- If not active: returns user with `subscription: 'cancelled'`
-
-#### `POST /subscription/rc-webhook`
-
-**RevenueCat webhook. Called by RevenueCat servers — NOT the mobile app. No JWT auth.**
-
-```
-Request:  RevenueCat webhook event payload (JSON)
-Response: 200 OK — always, including on non-fatal errors
-Auth:     None (JWT not required). Secured via Authorization header.
-```
-
-**Security:** Validate `request.headers.authorization === `Bearer ${process.env.REVENUECAT_WEBHOOK_SECRET}`` before processing. Always return `200` — non-2xx causes RC to retry.
-
-**Request body format:**
-
-```json
-{
-  "api_version": "1.0",
-  "event": {
-    "type": "RENEWAL",
-    "app_user_id": "<user-db-id>",
-    "product_id": "pro_monthly",
-    "expiration_at_ms": 1740564000000,
-    "purchased_at_ms": 1737972000000,
-    "store": "PLAY_STORE"
-  }
-}
-```
-
-**User lookup:** find by `id` where `id = event.app_user_id` (set via `Purchases.logIn(user.id)` on the client).
-
-**Event type actions:**
-
-| Event type | DB Action |
-|------------|-----------|
-| `INITIAL_PURCHASE` | Set `subscription: 'pro'`, `nextPaymentDate` from `expiration_at_ms`, `productId` from `product_id` |
-| `RENEWAL` | Update `nextPaymentDate` from `expiration_at_ms` |
-| `CANCELLATION` | No immediate change — `nextPaymentDate` intact; `GET /me` handles expiry at period end |
-| `EXPIRATION` | Set `subscription: 'cancelled'`, `nextPaymentDate: null` |
-| `BILLING_ISSUE` | Set `subscription: 'cancelled'`, `nextPaymentDate: null` |
-| `UNCANCELLATION` | Keep existing `subscription: 'pro'` and `nextPaymentDate` |
-
-**Error handling:** wrap entire handler in try/catch — always return `200`:
-
-```typescript
-try {
-  // ... handle event
-} catch (err) {
-  fastify.log.error({ err, appUserId: event.app_user_id }, 'RC webhook error');
-}
-return reply.status(200).send({ received: true });
-```
-
----
-
-#### `GET /me` — subscription auto-expire
-
-Before returning the user object, check if subscription has lapsed:
-
-```javascript
-if (user.subscription === 'pro' && user.nextPaymentDate && new Date(user.nextPaymentDate) < new Date()) {
-  await prisma.user.update({ where: { id }, data: { subscription: 'cancelled' } });
-  user.subscription = 'cancelled';
-}
-```
-
-This acts as a safety net for any events missed by the RC webhook.
-
-### RevenueCat Dashboard Setup
-
-One-time setup steps to connect RevenueCat to the app and backend.
-
-#### Step 1 — Create RC project and connect Google Play
-
-1. Sign up at [app.revenuecat.com](https://app.revenuecat.com) → **Create new project**.
-2. Add app → select **Google Play Store** → enter package name `com.anonymous.kumo`.
-3. Upload your Google Play service account JSON (same service account used previously for Play API verification).
-
-#### Step 2 — Create entitlement and products
-
-1. **Entitlements** → **New Entitlement** → identifier: `pro`.
-2. **Products** → **New Product** → add `pro_monthly` and `pro_quarterly` (must match Play Store product IDs exactly).
-3. Attach both products to the `pro` entitlement.
-
-#### Step 3 — Create offering
-
-1. **Offerings** → **New Offering** → identifier: `default`.
-2. Add packages: one with `pro_monthly` (Monthly package type), one with `pro_quarterly` (3 Month package type).
-3. Set `default` as the current offering.
-
-#### Step 4 — Configure webhook
-
-1. RC Dashboard → **Project Settings** → **Webhooks** → **Add webhook**.
-2. **Endpoint URL:** `https://your-backend.com/subscription/rc-webhook`
-3. **Authorization header value:** set to your `REVENUECAT_WEBHOOK_SECRET`
-4. Select events: `INITIAL_PURCHASE`, `RENEWAL`, `CANCELLATION`, `EXPIRATION`, `BILLING_ISSUE`, `UNCANCELLATION`
-5. Save and send a test event to verify the endpoint responds with `200`.
-
----
-
-### Push Notifications (server-side sending)
-
-The server sends push notifications to devices via the **Expo Push API** using the `pushToken` stored on each user.
-
-#### Expo Push API endpoint
-
-```
-POST https://exp.host/--/api/v2/push/send
-Content-Type: application/json
-Authorization: Bearer <EXPO_ACCESS_TOKEN>   (optional but recommended)
-```
-
-#### Message format
-
-```typescript
-interface ExpoPushMessage {
-  to: string            // Expo push token, e.g. "ExponentPushToken[xxx]"
-  title?: string
-  body: string
-  data?: Record<string, unknown>   // extra payload delivered to the app
-  sound?: 'default' | null
-  badge?: number
-}
-```
-
-#### Sending a notification (utility function)
-
-```typescript
-import fetch from 'node-fetch'
-
-async function sendPushNotification(
-  pushToken: string,
-  title: string | undefined,
-  body: string,
-  data?: Record<string, unknown>
-): Promise<void> {
-  const message = { to: pushToken, title, body, data, sound: 'default' }
-  await fetch('https://exp.host/--/api/v2/push/send', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(process.env.EXPO_ACCESS_TOKEN
-        ? { Authorization: `Bearer ${process.env.EXPO_ACCESS_TOKEN}` }
-        : {}),
-    },
-    body: JSON.stringify(message),
-  })
-}
-```
-
-#### Sending to a specific user (with notification flag check)
-
-```typescript
-async function notifyUser(
-  userId: string,
-  title: string | undefined,
-  body: string,
-  data?: Record<string, unknown>
-): Promise<void> {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { pushToken: true, notification: true },
-  })
-  if (!user?.pushToken || !user.notification) return
-  await sendPushNotification(user.pushToken, title, body, data)
-}
-```
-
-#### Sending to all users (broadcast)
-
-```typescript
-async function broadcastNotification(
-  title: string | undefined,
-  body: string,
-  data?: Record<string, unknown>
-): Promise<void> {
-  const users = await prisma.user.findMany({
-    where: { notification: true, pushToken: { not: null } },
-    select: { pushToken: true },
-  })
-  // Expo supports up to 100 messages per request
-  const chunks = chunkArray(users, 100)
-  for (const chunk of chunks) {
-    const messages = chunk.map((u) => ({
-      to: u.pushToken!,
-      title,
-      body,
-      data,
-      sound: 'default',
-    }))
-    await fetch('https://exp.host/--/api/v2/push/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(messages),
-    })
-  }
-}
-```
-
-#### Prisma schema changes
-
-Add to `prisma/schema.prisma`:
-```prisma
-model User {
-  // ... existing fields
-  notification  Boolean  @default(true)
-  pushToken     String?
-}
-```
-
-Run migration: `npx prisma migrate dev --name add_push_token`
-
-For **local SQLite** (`schema.test.prisma`), the same fields work since they use native SQLite types.
-
----
+- Verify Google Play purchase via Android Publisher API
+- Checks `paymentState === 1` (payment received)
+- Updates user `subscription: 'pro'` and `nextPaymentDate` from `expiryTimeMillis`
 
 ### Streak (auth required)
 
@@ -604,7 +341,6 @@ Response: { status: "ok" }
 
 ```json
 {
-  "id": "uuid",
   "firstName": "string | null",
   "lastName": "string | null",
   "email": "string",
@@ -638,11 +374,7 @@ Response: { status: "ok" }
 }
 ```
 
-Status codes: 400 (validation), 401 (unauthorized), 403 (forbidden), 404 (not found), 429 (rate limit), 500 (server error)
-
-**401 error messages:**
-- `"Authorization header missing"` — no/malformed Authorization header
-- `"Token expired or invalid"` — JWT expired or signature invalid
+Status codes: 400 (validation), 401 (unauthorized), 403 (forbidden), 404 (not found), 500 (server error)
 
 ---
 
@@ -654,18 +386,6 @@ Status codes: 400 (validation), 401 (unauthorized), 403 (forbidden), 404 (not fo
 - Validate file uploads: accept only audio/m4a, audio/mp4, audio/mpeg; max 10MB
 - Sanitize all user input before storing
 - On 401: client clears local auth state and redirects to login
-
-### Rate Limits
-
-| Endpoint | Limit | Key |
-|----------|-------|-----|
-| `POST /auth/register` | 5 req / min | IP |
-| `POST /auth/login` | 10 req / min | IP |
-| `POST /auth/google` | 10 req / min | IP |
-| `POST /chat/stream` | 20 req / hour | JWT user ID |
-| All other endpoints | 100 req / min | IP |
-
-Returns `429` with `{ message: "Too many requests, please try again later", statusCode: 429 }` when exceeded.
 
 ---
 
@@ -716,12 +436,9 @@ GOOGLE_WEB_CLIENT_ID=...
 GOOGLE_ANDROID_CLIENT_ID=...
 GOOGLE_IOS_CLIENT_ID=...
 
-# RevenueCat (subscription management)
-REVENUECAT_SECRET_API_KEY=sk_...     # Secret API key from RC dashboard (Project Settings → API Keys)
-REVENUECAT_WEBHOOK_SECRET=...        # Shared secret set in RC webhook config (used in Authorization header)
-
-# Expo Push Notifications (optional — increases delivery reliability)
-EXPO_ACCESS_TOKEN=...            # From expo.dev → Account Settings → Access Tokens
+# Google Play (subscription verification)
+GOOGLE_SERVICE_ACCOUNT_KEY={"type":"service_account",...}  # JSON string
+ANDROID_PACKAGE_NAME=com.yourapp.kumo
 
 # Google Sheets (feedback)
 GOOGLE_SHEETS_PRIVATE_KEY=...
@@ -795,5 +512,3 @@ All seeded users share the password `Password123!`:
 - SSE keep-alive: send `: keepalive\n\n` every 15s to prevent timeout
 - The stream endpoint handles client disconnect gracefully (clears keep-alive interval on `request.raw.on('close', ...)`)
 - Chat is stateless — the client owns conversation history and sends it with each stream request
-- Token estimation uses `ceil(chars / 4)` — accurate enough for limiting, not billing
-- `validateMessageTokens()` is in `src/services/chat.service.ts` and throws before SSE headers are written, so errors return a clean JSON 400 (not an SSE error event)
