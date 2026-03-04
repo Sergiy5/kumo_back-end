@@ -31,12 +31,14 @@ const chatRoutes: FastifyPluginAsync = async (fastify) => {
     },
   }, async (request, reply) => {
     const parsed = chatStreamSchema.safeParse(request.body);
+    
     if (!parsed.success) {
       return httpError(parsed.error.errors[0].message, 400);
     }
-
+    
     const { messages } = parsed.data;
-
+    
+    console.log("Parsed chat stream data:", messages);
     validateMessageTokens(messages);
 
     // Set SSE headers
@@ -66,7 +68,7 @@ const chatRoutes: FastifyPluginAsync = async (fastify) => {
           `data: ${JSON.stringify({ type: 'token', content: token })}\n\n`
         );
       }
-
+// console.log("TRY_CATCH>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
       // Send done event
       reply.raw.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
 

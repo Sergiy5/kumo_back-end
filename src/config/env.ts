@@ -33,10 +33,10 @@ const envSchema = z.object({
   GOOGLE_SHEETS_PRIVATE_KEY: isProd ? z.string() : optional,
   GOOGLE_SHEETS_CLIENT_EMAIL: isProd ? z.string() : optional,
   GOOGLE_SHEETS_SPREADSHEET_ID: isProd ? z.string() : optional,
-  // Google OAuth Client IDs
-  GOOGLE_WEB_CLIENT_ID: isProd ? z.string() : optional,
-  GOOGLE_ANDROID_CLIENT_ID: isProd ? z.string() : optional,
-  GOOGLE_IOS_CLIENT_ID: isProd ? z.string() : optional,
+  // Google OAuth Client IDs (at least one required in production)
+  GOOGLE_WEB_CLIENT_ID: optional,
+  GOOGLE_ANDROID_CLIENT_ID: optional,
+  GOOGLE_IOS_CLIENT_ID: optional,
   PORT: z.string().transform(Number).default('3001'),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 });
